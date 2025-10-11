@@ -40,21 +40,16 @@ def read_scores(path: str) -> pd.DataFrame:
             return pd.DataFrame(columns=["id", "video", "score"])
     return pd.DataFrame(columns=["id", "video", "score"])
 
-from filelock import FileLock
-
 def upsert_score(path: str, rec_id: int, video_name: str, score: int) -> pd.DataFrame:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    lock = FileLock(path + ".lock")
-    with lock:
-        df = read_scores(path)
-        if (df["id"] == rec_id).any():
-            df.loc[df["id"] == rec_id, ["video", "score"]] = [video_name, score]
-        else:
-            df = pd.concat(
-                [df, pd.DataFrame([{"id": rec_id, "video": video_name, "score": score}])],
-                ignore_index=True
-            )
-        df.to_csv(path, index=False)
+    df = read_scores(path)
+    if (df["id"] == rec_id).any():
+        df.loc[df["id"] == rec_id, ["video", "score"]] = [video_name, score]
+    else:
+        df = pd.concat(
+            [df, pd.DataFrame([{"id": rec_id, "video": video_name, "score": score}])],
+            ignore_index=True
+        )
+    df.to_csv(path, index=False)
     return df
 
 # ====== 사이드바 ======
