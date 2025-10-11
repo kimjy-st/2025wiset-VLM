@@ -285,7 +285,12 @@ video_url, video_name = build_video_url(vpath, video_map_df)
 
 col1, col2 = st.columns([3,2])
 with col1:
-    st.subheader("Video")
+    # (선택) 어떤 파일이 매칭됐는지 더 명확히 표시하고 싶다면:
+    if video_name.endswith("__cv2.mp4"):
+        st.caption(f"파일명: {video_name} (cv2 변환본 사용)")
+    else:
+        st.caption(f"파일명: {video_name}")
+        st.subheader("Video")
     if video_url is None:
         st.error(f"영상 URL/ID를 찾을 수 없습니다. 파일명: {basename_only(vpath)}")
         with st.expander("해결 가이드"):
