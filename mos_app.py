@@ -126,7 +126,7 @@ jsonl_index = {str(row["name"]).strip(): str(row["file_id"]).strip()
 
 # mos_results 내 JSONL 목록만 추려서 셀렉트박스
 # 모든 JSONL 파일을 포함 (mos_results 폴더 여부와 관계없이)
-jsonl_display = sorted(list(jsonl_index.keys()))
+jsonl_display = sorted([name for name in jsonl_index.keys() if str(name).lower().endswith(".jsonl")])
 selected_file = st.sidebar.selectbox("JSONL 파일 선택", jsonl_display)
 username = st.sidebar.text_input("User name", value="", placeholder="예: jykim")
 
