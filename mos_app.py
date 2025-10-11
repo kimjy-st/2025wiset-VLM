@@ -1,31 +1,66 @@
-# mos_app.py — Streamlit Cloud 배포용 (Google Drive mapping.csv 사용)
+# mos_app.py — Streamlit Cloud 배포용 (Google Drive mapping.csv 사용, ID 정규화/리다이렉트 대응)
 import os
 import io
+import re
 import json
 import pandas as pd
 import requests
 import streamlit as st
 
 # =========================
-# 설정: mapping.csv 의 Google Drive "file id"만 넣으면 됩니다.
-# 예) https://drive.google.com/file/d/<MAPPING_FILE_ID>/view
-MAPPING_FILE_ID = st.secrets.get("MAPPING_FILE_ID", "")  # 배포 시 Streamlit Secrets로 넣는 것을 권장
+# 설정: mapping.csv 의 Google Drive "file id" 또는 전체 URL을 넣어도 됩니다.
+# 예) "1AbCdEf..." 또는 "https://drive.google.com/file/d/1AbCdEf.../view?usp=sharing"
+MAPPING_FILE_ID_RAW = st.secrets.get("MAPPING_FILE_ID", "")
 # =========================
 
 st.set_page_config(page_title="MOS 라벨링 툴 (Drive)", layout="wide")
 
+def extract_drive_id(s: str) -> str:
+    """Drive file id 또는 전체 URL이 들어와도 fileId만 안정적으로 뽑아낸다."""
+    if not s:
+        return ""
+    s = s.strip().strip('"').strip("'")
+    # /d/<id>/ 패턴
+    m = re.search(r"/d/([a-zA-Z0-9_-]+)", s)
+    if m:
+        return m.group(1)
+    # ?id=<id> 패턴
+    m = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", s)
+    if m:
+        return m.group(1)
+    # 그냥 id가 들어왔을 때: 끝의 슬래시 제거
+    return s.rstrip("/").strip()
+
+MAPPING_FILE_ID = extract_drive_id(MAPPING_FILE_ID_RAW)
+
 @st.cache_data(show_spinner=True)
 def fetch_drive_file_binary(file_id: str) -> bytes:
-    """공개 파일 기준: Google Drive 'uc?export=download&id='로 다운로드"""
+    """
+    공개 파일 기준: Google Drive 'uc?export=download&id='로 다운로드
+    - allow_redirects=True 로 리다이렉트 허용
+    - 로그인 페이지가 뜨면 친절한 에러 표시
+    """
+    if not file_id:
+        raise RuntimeError("MAPPING_FILE_ID 가 비었습니다.")
+    session = requests.Session()
     url = f"https://drive.google.com/uc?export=download&id={file_id}"
-    r = requests.get(url, timeout=60)
-    r.raise_for_status()
-    return r.content
+    resp = session.get(url, allow_redirects=True, timeout=60)
+    # 드라이브가 로그인 페이지를 반환할 때의 흔한 신호
+    if "ServiceLogin" in resp.text or "signin/v2/identifier" in resp.url:
+        raise RuntimeError("Google이 로그인 페이지를 반환했습니다. 파일이 '링크가 있는 모든 사용자(보기)'로 공개되어 있는지 확인하세요.")
+    resp.raise_for_status()
+    return resp.content
 
 @st.cache_data(show_spinner=True)
 def load_mapping_csv(file_id: str) -> pd.DataFrame:
     content = fetch_drive_file_binary(file_id)
-    return pd.read_csv(io.BytesIO(content))
+    # pandas가 제대로 읽지 못하면 에러를 던지게 함
+    try:
+        return pd.read_csv(io.BytesIO(content))
+    except Exception as e:
+        # 디버깅을 위해 앞부분 샘플 노출
+        head = content[:200].decode("utf-8", errors="ignore")
+        raise RuntimeError(f"CSV 파싱 실패: {e}\n응답 샘플: {head}")
 
 def pick_first_key(d: dict, candidates, default=""):
     for k in candidates:
@@ -66,6 +101,11 @@ if not MAPPING_FILE_ID:
     st.sidebar.error("MAPPING_FILE_ID 가 비어 있습니다. Streamlit Secrets에 MAPPING_FILE_ID를 추가하세요.")
     st.stop()
 
+# 디버그: 정규화된 ID와 테스트 URL 안내(필요시 확인)
+with st.sidebar.expander("디버그: mapping.csv 링크 확인"):
+    st.code(MAPPING_FILE_ID, language="text")
+    st.markdown(f"[테스트 다운로드 링크](https://drive.google.com/uc?export=download&id={MAPPING_FILE_ID})")
+
 try:
     mapping_df = load_mapping_csv(MAPPING_FILE_ID)
 except Exception as e:
@@ -79,13 +119,13 @@ if not required_cols.issubset(set(mapping_df.columns)):
     st.stop()
 
 # 인덱스 구성
-video_index = {row["name"].strip(): row["file_id"].strip()
-               for _, row in mapping_df[mapping_df["type"]=="video"].iterrows()}
-jsonl_index = {row["name"].strip(): row["file_id"].strip()
-               for _, row in mapping_df[mapping_df["type"]=="jsonl"].iterrows()}
+video_index = {str(row["name"]).strip(): str(row["file_id"]).strip()
+               for _, row in mapping_df[mapping_df["type"].astype(str)=="video"].iterrows()}
+jsonl_index = {str(row["name"]).strip(): str(row["file_id"]).strip()
+               for _, row in mapping_df[mapping_df["type"].astype(str)=="jsonl"].iterrows()}
 
 # mos_results 내 JSONL 목록만 추려서 셀렉트박스
-jsonl_display = sorted([name for name in jsonl_index.keys() if name.lower().endswith(".jsonl")])
+jsonl_display = sorted([name for name in jsonl_index.keys() if str(name).lower().endswith(".jsonl")])
 selected_file = st.sidebar.selectbox("mos_results 내 파일 선택", jsonl_display)
 username = st.sidebar.text_input("User name", value="", placeholder="예: jykim")
 
