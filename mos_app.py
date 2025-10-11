@@ -1,4 +1,4 @@
-# mos_app.py — GitHub 폴더 내 모든 JSONL 자동 로드 버전
+# mos_app.py — GitHub API 기반 .jsonl 자동 로드 버전
 import os
 import io
 import re
@@ -6,9 +6,8 @@ import json
 import pandas as pd
 import requests
 import streamlit as st
-from bs4 import BeautifulSoup
 
-st.set_page_config(page_title="MOS 라벨링 툴 (GitHub 폴더)", layout="wide")
+st.set_page_config(page_title="MOS 라벨링 툴 (GitHub API)", layout="wide")
 
 # =========================
 # 예: https://github.com/kimjy-st/2025wiset-VLM/blob/main/mos_results/
@@ -17,46 +16,37 @@ GITHUB_JSONL_URL = st.secrets.get("GITHUB_JSONL_URL", "")
 
 
 # ---------- 유틸 ----------
-def github_to_raw(url: str) -> str:
-    """github.com/.../blob/... → raw.githubusercontent.com/... 로 변환"""
-    if "raw.githubusercontent.com" in url:
-        return url
-    m = re.match(r"https?://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.*)", url)
-    if m:
-        user, repo, branch, path = m.groups()
-        return f"https://raw.githubusercontent.com/{user}/{repo}/{branch}/{path}"
-    return url
-
-
-def list_github_jsonl_files(folder_url: str):
-    """GitHub 폴더 URL에서 JSONL 파일들을 찾아 리스트 반환"""
-    # 브랜치, 경로 파싱
-    m = re.match(r"https?://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.*)", folder_url)
-    if not m:
-        # 폴더 링크 (예: /tree/main/)
-        m = re.match(r"https?://github\.com/([^/]+)/([^/]+)/tree/([^/]+)/(.*)", folder_url)
+def parse_github_url(url: str):
+    """
+    github.com/<user>/<repo>/blob/<branch>/<path>
+    또는 github.com/<user>/<repo>/tree/<branch>/<path> → (user, repo, branch, path)
+    """
+    m = re.match(r"https?://github\.com/([^/]+)/([^/]+)/(?:blob|tree)/([^/]+)/(.*)", url)
     if not m:
         st.error("GITHUB_JSONL_URL 형식이 잘못되었습니다. 예: https://github.com/<user>/<repo>/tree/main/mos_results/")
         st.stop()
-    user, repo, branch, path = m.groups()
+    return m.groups()  # user, repo, branch, path
 
-    html_url = f"https://github.com/{user}/{repo}/tree/{branch}/{path.strip('/')}"
-    resp = requests.get(html_url)
-    resp.raise_for_status()
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    links = soup.select("a.js-navigation-open.Link--primary")
+def list_github_jsonl_files(url: str):
+    """GitHub API를 이용해 폴더 내 .jsonl 파일 리스트 반환"""
+    user, repo, branch, path = parse_github_url(url)
+    api_url = f"https://api.github.com/repos/{user}/{repo}/contents/{path}?ref={branch}"
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    r = requests.get(api_url, headers=headers)
+    if r.status_code != 200:
+        raise RuntimeError(f"GitHub API 요청 실패: {r.status_code}, {r.text}")
+    data = r.json()
     files = []
-    for a in links:
-        name = a.text.strip()
-        if name.endswith(".jsonl"):
-            raw_url = f"https://raw.githubusercontent.com/{user}/{repo}/{branch}/{path.strip('/')}/{name}"
-            files.append((name, raw_url))
+    for f in data:
+        if f["type"] == "file" and f["name"].endswith(".jsonl"):
+            files.append((f["name"], f["download_url"]))
     return files
 
 
 @st.cache_data(show_spinner=True)
 def load_jsonl_from_url(url: str):
+    """JSONL을 URL에서 로드"""
     r = requests.get(url, timeout=60)
     r.raise_for_status()
     return [json.loads(line) for line in r.text.splitlines() if line.strip()]
@@ -97,7 +87,6 @@ if not jsonl_files:
     st.sidebar.warning("폴더 내에서 .jsonl 파일을 찾지 못했습니다.")
     st.stop()
 
-# 파일 선택
 file_names = [f[0] for f in jsonl_files]
 selected_file = st.sidebar.selectbox("JSONL 파일 선택", file_names)
 jsonl_url = dict(jsonl_files)[selected_file]
@@ -111,7 +100,7 @@ except Exception as e:
     st.error(f"JSONL 로드 실패: {e}")
     st.stop()
 
-# ---------- 상태 초기화 ----------
+# ---------- 상태 ----------
 if "idx" not in st.session_state:
     st.session_state["idx"] = 0
 if "scores" not in st.session_state:
@@ -129,11 +118,11 @@ st.session_state["idx"] = max(0, min(st.session_state["idx"], len(records) - 1))
 left, mid, right = st.columns([1, 2, 1])
 with left:
     if st.button("◀ 이전", use_container_width=True):
-        st.session_state["idx"] -= 1
+        st.session_state["idx"] = max(0, st.session_state["idx"] - 1)
         st.rerun()
 with right:
     if st.button("다음 ▶", use_container_width=True):
-        st.session_state["idx"] += 1
+        st.session_state["idx"] = min(len(records) - 1, st.session_state["idx"] + 1)
         st.rerun()
 with mid:
     st.markdown(
@@ -170,7 +159,6 @@ with col2:
     st.subheader("Answer")
     st.text_area("", value=answer or "(없음)", height=160, label_visibility="collapsed", disabled=True)
 
-    # 기존 점수
     default_score = 3
     if not st.session_state["scores"].empty:
         row = st.session_state["scores"]
