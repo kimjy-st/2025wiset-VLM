@@ -1,83 +1,123 @@
-# mos_app.py
+# mos_app.py — Streamlit Cloud 배포용 (Google Drive mapping.csv 사용)
 import os
+import io
 import json
-import glob
 import pandas as pd
+import requests
 import streamlit as st
 
-# ====== 경로 설정 ======
-MOS_RESULTS_DIR = "/home/jykim1/EventDetection/HolmesVAU/custom_tests/cococaption/mos_results"
-VIDEO_ROOT      = "/mnt/data/HIVAU-70k/videos/xd-violence/videos/test"
+# =========================
+# 설정: mapping.csv 의 Google Drive "file id"만 넣으면 됩니다.
+# 예) https://drive.google.com/file/d/<MAPPING_FILE_ID>/view
+MAPPING_FILE_ID = st.secrets.get("MAPPING_FILE_ID", "")  # 배포 시 Streamlit Secrets로 넣는 것을 권장
+# =========================
 
-# ====== 기본 설정 ======
-st.set_page_config(page_title="MOS 라벨링 툴", layout="wide")
+st.set_page_config(page_title="MOS 라벨링 툴 (Drive)", layout="wide")
 
-# ====== 유틸 ======
-def load_jsonl(path):
-    """jsonl을 한 줄씩 읽어 dict 리스트로 반환"""
+@st.cache_data(show_spinner=True)
+def fetch_drive_file_binary(file_id: str) -> bytes:
+    """공개 파일 기준: Google Drive 'uc?export=download&id='로 다운로드"""
+    url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    return r.content
+
+@st.cache_data(show_spinner=True)
+def load_mapping_csv(file_id: str) -> pd.DataFrame:
+    content = fetch_drive_file_binary(file_id)
+    return pd.read_csv(io.BytesIO(content))
+
+def pick_first_key(d: dict, candidates, default=""):
+    for k in candidates:
+        if k in d and d[k] not in (None, ""):
+            return d[k]
+    return default
+
+def normalize_text(v):
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v
+    try:
+        return json.dumps(v, ensure_ascii=False)
+    except Exception:
+        return str(v)
+
+def parse_jsonl_bytes(b: bytes):
     out = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            s = line.strip()
-            if not s:
-                continue
-            try:
-                out.append(json.loads(s))
-            except Exception:
-                # 형식 불명확 줄은 스킵
-                pass
+    for line in b.decode("utf-8", errors="ignore").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        try:
+            out.append(json.loads(s))
+        except Exception:
+            pass
     return out
 
-def csv_path_for(file_basename: str, username: str) -> str:
-    base = os.path.splitext(file_basename)[0]  # ".jsonl" 제거
-    return os.path.join(MOS_RESULTS_DIR, f"{base}_{username}.csv")
+def drive_preview_url(file_id: str) -> str:
+    """Drive 미리보기(스트리밍) URL"""
+    return f"https://drive.google.com/file/d/{file_id}/preview"
 
-def read_scores(path: str) -> pd.DataFrame:
-    if path and os.path.exists(path):
-        try:
-            return pd.read_csv(path)
-        except Exception:
-            return pd.DataFrame(columns=["id", "video", "score"])
-    return pd.DataFrame(columns=["id", "video", "score"])
-
-def upsert_score(path: str, rec_id: int, video_name: str, score: int) -> pd.DataFrame:
-    df = read_scores(path)
-    if (df["id"] == rec_id).any():
-        df.loc[df["id"] == rec_id, ["video", "score"]] = [video_name, score]
-    else:
-        df = pd.concat(
-            [df, pd.DataFrame([{"id": rec_id, "video": video_name, "score": score}])],
-            ignore_index=True
-        )
-    df.to_csv(path, index=False)
-    return df
-
-# ====== 사이드바 ======
+# ===== 사이드바 =====
 st.sidebar.header("설정")
-jsonl_files = sorted(glob.glob(os.path.join(MOS_RESULTS_DIR, "*.jsonl")))
-file_display = [os.path.basename(p) for p in jsonl_files]
-selected_file = st.sidebar.selectbox("mos_results 내 파일 선택", file_display)
+
+if not MAPPING_FILE_ID:
+    st.sidebar.error("MAPPING_FILE_ID 가 비어 있습니다. Streamlit Secrets에 MAPPING_FILE_ID를 추가하세요.")
+    st.stop()
+
+try:
+    mapping_df = load_mapping_csv(MAPPING_FILE_ID)
+except Exception as e:
+    st.sidebar.error(f"mapping.csv 로드 실패: {e}")
+    st.stop()
+
+# 기대 컬럼 확인
+required_cols = {"name", "type", "file_id"}
+if not required_cols.issubset(set(mapping_df.columns)):
+    st.sidebar.error("mapping.csv 는 name,type,file_id 컬럼을 포함해야 합니다.")
+    st.stop()
+
+# 인덱스 구성
+video_index = {row["name"].strip(): row["file_id"].strip()
+               for _, row in mapping_df[mapping_df["type"]=="video"].iterrows()}
+jsonl_index = {row["name"].strip(): row["file_id"].strip()
+               for _, row in mapping_df[mapping_df["type"]=="jsonl"].iterrows()}
+
+# mos_results 내 JSONL 목록만 추려서 셀렉트박스
+jsonl_display = sorted([name for name in jsonl_index.keys() if name.lower().endswith(".jsonl")])
+selected_file = st.sidebar.selectbox("mos_results 내 파일 선택", jsonl_display)
 username = st.sidebar.text_input("User name", value="", placeholder="예: jykim")
 
-# ====== 세션 상태 초기화 ======
+# ===== 세션 상태 =====
 if "records" not in st.session_state:
     st.session_state["records"] = []
 if "idx" not in st.session_state:
     st.session_state["idx"] = 0
 if "active_file" not in st.session_state:
     st.session_state["active_file"] = None
+if "scores" not in st.session_state:
+    st.session_state["scores"] = pd.DataFrame(columns=["id", "video", "score", "rater"])
 
-# 파일 변경 시 로드 (인덱스 0으로 리셋)
+# 파일 변경 시 JSONL 로드
 if selected_file and st.session_state["active_file"] != selected_file:
-    sel_path = os.path.join(MOS_RESULTS_DIR, selected_file)
-    st.session_state["records"] = load_jsonl(sel_path)
-    st.session_state["idx"] = 0
-    st.session_state["active_file"] = selected_file
+    fid = jsonl_index.get(selected_file)
+    if not fid:
+        st.error(f"선택한 JSONL을 찾지 못했습니다: {selected_file}")
+        st.stop()
+    try:
+        data_bytes = fetch_drive_file_binary(fid)
+        st.session_state["records"] = parse_jsonl_bytes(data_bytes)
+        st.session_state["idx"] = 0
+        st.session_state["active_file"] = selected_file
+    except Exception as e:
+        st.error(f"JSONL 로드 실패: {e}")
+        st.stop()
 
-st.title("MOS 점수 매기기")
+st.title("MOS 라벨링 툴 (Google Drive)")
 
 if not selected_file:
-    st.info("왼쪽에서 파일을 선택하세요.")
+    st.info("왼쪽에서 JSONL 파일을 선택하세요.")
     st.stop()
 
 records = st.session_state["records"]
@@ -85,11 +125,7 @@ if not isinstance(records, list) or len(records) == 0:
     st.warning("선택한 파일에서 항목을 불러오지 못했습니다.")
     st.stop()
 
-# 현재 진행 CSV (유저명 없으면 저장 불가)
-csv_path = csv_path_for(selected_file, username) if username.strip() else None
-scores_df = read_scores(csv_path) if csv_path else pd.DataFrame(columns=["id","video","score"])
-
-# ====== 상단 내비게이션 ======
+# ===== 내비게이션 =====
 st.session_state["idx"] = max(0, min(st.session_state["idx"], len(records) - 1))
 
 left_nav, mid_nav, right_nav = st.columns([1,2,1])
@@ -107,23 +143,25 @@ with mid_nav:
         unsafe_allow_html=True
     )
 
-# ====== 현재 항목 표시 ======
+# ===== 현재 항목 =====
 curr = records[st.session_state["idx"]]
-rec_id = curr.get("id")
-video_name = curr.get("video", "")
-prompt = curr.get("prompt", "")
-answer = curr.get("answer", "")
-video_path = os.path.join(VIDEO_ROOT, video_name)
+rec_id     = pick_first_key(curr, ["id", "idx"])
+video_path = pick_first_key(curr, ["video", "video_path", "path"])
+prompt     = pick_first_key(curr, ["prompt", "instruction", "question"])
+# answer 오타/변형 대응
+answer_raw = pick_first_key(curr, ["answer", "anwser", "caption", "response", "text"])
+answer     = normalize_text(answer_raw)
+
+# 비디오 파일명(basename)으로 매핑
+video_basename = os.path.basename(str(video_path)).strip()
+file_id = video_index.get(video_basename)
 
 col_video, col_text = st.columns([3, 2], gap="large")
-
 with col_video:
-    st.subheader("Video")
-    if os.path.exists(video_path):
-        # HTML5 비디오 플레이어(스트리밍/시킹 지원)
-        st.video(video_path, format="video/mp4", start_time=0)
-        st.caption("재생바로 원하는 위치로 이동할 수 있습니다.")
-        # 평가 안내
+    st.subheader("Video (Google Drive)")
+    if file_id:
+        st.components.v1.iframe(drive_preview_url(file_id), height=400)
+        st.caption("Google Drive 미리보기 스트리밍(재생바 이동 가능)")
         st.markdown(
             """
             <div style="margin-top:8px;padding:12px;border:1px solid #e6e6e6;border-radius:8px;background:#fbfbfd;">
@@ -135,54 +173,63 @@ with col_video:
             unsafe_allow_html=True
         )
     else:
-        st.error(f"비디오 파일을 찾을 수 없습니다: {video_path}")
+        st.error(f"드라이브에서 '{video_basename}' 파일 ID를 찾을 수 없습니다.")
+        with st.expander("해결 방법"):
+            st.write("mapping.csv에 해당 파일명이 있는지 확인하세요. (name 열에 정확한 이름)")
 
 with col_text:
     st.subheader("Prompt")
-    st.code(prompt or "(없음)")
+    st.text(prompt or "(없음)")
     st.subheader("Answer")
-    st.write(answer or "(없음)")
+    st.text_area("", value=answer or "(없음)", height=160, label_visibility="collapsed", disabled=True)
     st.divider()
 
-    # CSV에 저장된 기존 점수 로드 (없으면 기본 3)
+    # 이미 저장된 점수 불러오기
     default_score = 3
-    try:
-        if not scores_df.empty and (scores_df["id"] == rec_id).any():
-            default_score = int(scores_df.loc[scores_df["id"] == rec_id, "score"].values[0])
-    except Exception:
-        default_score = 3
+    if not st.session_state["scores"].empty:
+        row = st.session_state["scores"]
+        row = row[(row["id"]==rec_id) & (row["rater"]==username)]
+        if not row.empty:
+            try:
+                default_score = int(row.iloc[0]["score"])
+            except Exception:
+                pass
 
-    # 슬라이더 키를 파일/유저/ID에 종속시켜 화면 전환 시 정확히 동기화
     score_key = f"score::{selected_file}::{username}::{rec_id}"
     if score_key not in st.session_state:
         st.session_state[score_key] = default_score
 
-    # 자동 저장 콜백
-    def _auto_save_callback(rec_id, video_name, score_key, csv_path):
-        if not csv_path:
-            st.warning("사용자 이름을 입력해야 점수가 저장됩니다.", icon="⚠️")
-            return
+    def _save_in_memory(rec_id, video_name, score_key, username):
         try:
             score_val = int(st.session_state[score_key])
         except Exception:
             return
-        upsert_score(csv_path, rec_id, video_name, score_val)
+        # upsert in session dataframe
+        df = st.session_state["scores"]
+        mask = (df["id"]==rec_id) & (df["rater"]==username)
+        if mask.any():
+            df.loc[mask, ["video","score"]] = [video_name, score_val]
+        else:
+            st.session_state["scores"] = pd.concat(
+                [df, pd.DataFrame([{"id":rec_id, "video":video_name, "score":score_val, "rater":username}])],
+                ignore_index=True
+            )
         st.toast(f"저장됨: id={rec_id}, score={score_val}")
 
-    # 슬라이더: 변경 시 즉시 저장
     st.slider(
         "Score (1~5)",
         min_value=1, max_value=5, step=1,
         key=score_key,
         help="5점에 가까울수록 프롬프트를 잘 반영한 설명입니다.",
-        on_change=_auto_save_callback,
-        args=(rec_id, video_name, score_key, csv_path)
+        on_change=_save_in_memory,
+        args=(rec_id, video_basename, score_key, username)
     )
 
-# ====== 진행 현황 ======
+# ===== 진행 현황 & 다운로드 =====
 st.divider()
 st.subheader("진행 현황")
-if username.strip():
-    st.dataframe(read_scores(csv_path_for(selected_file, username)), use_container_width=True)
-else:
-    st.caption("CSV 진행 현황은 사용자 이름 입력 후 표시됩니다.")
+st.dataframe(st.session_state["scores"], use_container_width=True)
+
+csv_bytes = st.session_state["scores"].to_csv(index=False).encode("utf-8")
+dl_name = f"{os.path.splitext(os.path.basename(selected_file))[0]}_{username or 'anonymous'}.csv"
+st.download_button("CSV 다운로드", data=csv_bytes, file_name=dl_name, mime="text/csv")
