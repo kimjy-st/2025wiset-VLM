@@ -137,7 +137,8 @@ video_path = pick_first_key(curr, ["video", "video_path", "path"])
 prompt = pick_first_key(curr, ["prompt", "instruction", "question"])
 answer_raw = pick_first_key(curr, ["answer", "anwser", "caption", "response", "text"])
 answer = normalize_text(answer_raw)
-
+import re
+video_basename = re.sub(r".*/", "", str(video_path)).strip()
 col1, col2 = st.columns([3, 2])
 with col1:
     st.subheader("Video")
