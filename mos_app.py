@@ -119,25 +119,53 @@ def basename_only(p: str) -> str:
 def drive_preview_url(fid: str) -> str:
     return f"https://drive.google.com/file/d/{fid}/preview"
 
+# === 이 함수만 교체 ===
 def build_video_url(video_path: str, mapping_df: pd.DataFrame | None) -> tuple[str | None, str]:
-    """ (재생URL 또는 'gdrive:<file_id>' 또는 None, 파일명) """
-    name = basename_only(video_path or "")
-    if not name:
+    """
+    JSONL의 video 경로에서 파일명 추출 후,
+    1) <stem>__cv2.mp4 가 mapping.csv에 있으면 그걸 우선 사용
+    2) 없으면 원본 파일명으로 검색
+    반환: ( "gdrive:<file_id>" 또는 직접 URL 또는 None, 매칭된_파일명 )
+    """
+    base = basename_only(video_path or "")
+    if not base:
         return None, ""
-    # mapping.csv에서 name 매칭
-    if mapping_df is not None and not mapping_df.empty:
-        df = mapping_df
-        # type 있으면 video만
-        if "type" in df.columns:
-            df = df[df["type"].astype(str).str.lower() == "video"]
-        row = df[df["name"].astype(str).str.strip() == name]
+
+    # 후보: cv2 변환본을 1순위
+    stem, ext = os.path.splitext(base)
+    candidates = []
+    # 확장자가 있으면 stem__cv2.mp4, 없으면 base__cv2.mp4도 고려
+    candidates.append(f"{stem}__cv2.mp4" if ext else f"{base}__cv2.mp4")
+    candidates.append(base)
+
+    if mapping_df is None or mapping_df.empty:
+        return None, base
+
+    df = mapping_df.copy()
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    # type 컬럼이 있으면 video만 필터
+    if "type" in df.columns:
+        df = df[df["type"].astype(str).str.lower() == "video"]
+
+    # name 컬럼 필수
+    if "name" not in df.columns:
+        return None, base
+
+    # 공백 제거 후 일치 검색
+    df["name"] = df["name"].astype(str).str.strip()
+
+    for cand in candidates:
+        row = df[df["name"] == cand]
         if not row.empty:
             r0 = row.iloc[0]
-            if "url" in df.columns and pd.notna(r0.get("url")):
-                return str(r0["url"]).strip(), name
-            if "file_id" in df.columns and pd.notna(r0.get("file_id")):
-                return f"gdrive:{str(r0['file_id']).strip()}", name
-    return None, name
+            # url 우선, 없으면 file_id → gdrive 프리뷰
+            if "url" in df.columns and pd.notna(r0.get("url")) and str(r0["url"]).strip():
+                return str(r0["url"]).strip(), cand
+            if "file_id" in df.columns and pd.notna(r0.get("file_id")) and str(r0["file_id"]).strip():
+                return f"gdrive:{str(r0['file_id']).strip()}", cand
+
+    # 둘 다 못 찾은 경우
+    return None, base
 
 # ============== 사이드바 ==============
 st.sidebar.header("설정")
