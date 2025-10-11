@@ -7,7 +7,7 @@ import requests
 import streamlit as st
 from urllib.parse import quote
 
-st.set_page_config(page_title="MOS 라벨링 툴 (GitHub + mapping.csv)", layout="wide")
+st.set_page_config(page_title="MOS 점수 매기기", layout="wide")
 
 # =========================
 # 필수: 깃허브의 JSONL 폴더 링크 (폴더 내 .jsonl 자동 탐색)
@@ -198,7 +198,7 @@ if "idx" not in st.session_state:
 if "scores" not in st.session_state:
     st.session_state["scores"] = pd.DataFrame(columns=["id", "video", "score", "rater"])
 
-st.title(f"MOS 라벨링 툴 ({selected_file})")
+st.title(f"MOS 점수 매기기 ({selected_file})")
 
 if not isinstance(records, list) or len(records) == 0:
     st.warning("JSONL 파일이 비어 있습니다.")
